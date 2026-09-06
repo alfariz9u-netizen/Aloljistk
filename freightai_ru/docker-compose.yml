@@ -1,0 +1,76 @@
+# This docker-compose stack is for an ALWAYS-ON host (VPS, Oracle Cloud
+# Always Free, etc.) -- backend, bot (long-polling, BOT_MODE=polling), and
+# a standalone worker run as separate containers. For a free single-web-
+# service host with no background-worker tier (Render/Fly/etc.), use
+# Dockerfile.webapp instead -- see README.md's "Free hosting" section.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-freight}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-freight}
+      POSTGRES_DB: ${POSTGRES_DB:-freightai}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-freight}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-freight}:${POSTGRES_PASSWORD:-freight}@postgres:5432/${POSTGRES_DB:-freightai}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.workers.scheduler"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-freight}:${POSTGRES_PASSWORD:-freight}@postgres:5432/${POSTGRES_DB:-freightai}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bot:
+    build: ./bot
+    env_file: .env
+    environment:
+      BACKEND_BASE_URL: http://backend:8000
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
