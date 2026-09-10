@@ -27,11 +27,6 @@ ROLE_LABELS = {"CARRIER": "🚛 Перевозчик", "SHIPPER": "📦 Груз
 
 
 def _parse_referral_code(command: CommandObject, own_telegram_id: str) -> str | None:
-    """Deep-link start parameter format: /start ref_<referrer_telegram_id>
-    (see bot's /invite command below, which generates these links).
-    Rejects anything that isn't a plausible numeric telegram_id, and
-    rejects self-referral at the parsing stage too (defense in depth --
-    services/referrals.py rejects it again server-side regardless)."""
     if not command.args or not command.args.startswith("ref_"):
         return None
     candidate = command.args[len("ref_"):]
@@ -76,7 +71,14 @@ async def choose_role(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.update_data(role=role)
-    await callback.message.edit_text(f"Выбрано: {ROLE_LABELS[role]}\n\nКак вас зовут?")
+    text = f"Выбрано: {ROLE_LABELS[role]}"
+    if role == "CARRIER":
+        text += (
+            "\n\n🎁 Вам предоставлена бесплатная подписка на 30 дней: "
+            "неограниченные уведомления о новых грузах и приоритет в рассылках."
+        )
+    text += "\n\nКак вас зовут?"
+    await callback.message.edit_text(text)
     await state.set_state(Onboarding.name)
     await callback.answer()
 
@@ -113,10 +115,6 @@ async def got_phone(message: Message, state: FSMContext):
 
 @router.message(Command("invite"))
 async def invite(message: Message):
-    """Shows a carrier their personal referral link + current standing
-    (referral count, today's broadcast quota). Referral points and the
-    quota bonus they drive are explained in services/quotas.py -- this
-    is just the user-facing view of that same data."""
     telegram_id = str(message.from_user.id)
     try:
         user = await api.get_user(telegram_id)
@@ -132,6 +130,15 @@ async def invite(message: Message):
     bot_username = (await message.bot.get_me()).username
     link = f"https://t.me/{bot_username}?start=ref_{telegram_id}"
 
+    subscription_line = ""
+    if user.get("subscription_active"):
+        expires = user.get("subscription_expires_at")
+        if expires:
+            date_part = expires.split("T")[0]
+            subscription_line = f"\n💎 Подписка активна до {date_part} (безлимитные уведомления)."
+        else:
+            subscription_line = "\n💎 У вас активна безлимитная подписка (бессрочно)."
+
     text = (
         "🤝 Ваша реферальная ссылка\n\n"
         f"{link}\n\n"
@@ -141,6 +148,6 @@ async def invite(message: Message):
         f"📊 Ваша статистика:\n"
         f"Успешных приглашений: {user['referral_points']}\n"
         f"Дневной лимит уведомлений: {user['daily_broadcast_used']} / {user['daily_quota_limit']}"
-        + ("\n💎 У вас активна безлимитная подписка." if user.get("subscription_active") else "")
+        + subscription_line
     )
     await message.answer(text)
