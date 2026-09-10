@@ -32,9 +32,6 @@ async def upsert_user(payload: UpsertUserIn, db: AsyncSession = Depends(get_db))
     user, created = await db_utils.get_or_create(db, stmt, make_row)
 
     if created and payload.referral_code:
-        # Only ever set on the very first creation of this user's row --
-        # a referral relationship is captured once and never editable
-        # afterwards (see services/referrals.py).
         await referrals.set_referred_by(db, user, payload.referral_code)
 
     if not created:
@@ -46,10 +43,6 @@ async def upsert_user(payload: UpsertUserIn, db: AsyncSession = Depends(get_db))
     if payload.phone:
         user.phone = payload.phone
         if not had_phone_before:
-            # First real phone number submitted -- this is the
-            # "registration completed" signal that triggers the
-            # referrer's reward (see services/referrals.py's anti-abuse
-            # rationale: rewarding on /start alone would be gameable).
             await referrals.reward_referral_if_needed(db, user)
 
     await db.commit()
@@ -63,10 +56,14 @@ async def set_role(payload: SetRoleIn, db: AsyncSession = Depends(get_db)):
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     if user.role == UserRole.ADMIN:
-        # Never let a bootstrap-admin accidentally demote themselves via
-        # the normal registration flow.
         raise HTTPException(status_code=400, detail="Admin role is managed separately")
     user.role = UserRole[payload.role]
+
+    if user.role == UserRole.CARRIER:
+        # Free launch trial -- see services/quotas.grant_carrier_trial_if_needed
+        # for the full rationale and the one-time-per-user guard.
+        quotas.grant_carrier_trial_if_needed(user)
+
     await db.commit()
     return {"id": str(user.id), "role": user.role.value}
 
@@ -83,4 +80,5 @@ async def get_user(telegram_id: str, db: AsyncSession = Depends(get_db)):
         "daily_broadcast_used": user.daily_broadcast_used,
         "daily_quota_limit": quotas.daily_quota_limit(user),
         "subscription_active": user.subscription_active,
+        "subscription_expires_at": user.subscription_expires_at.isoformat() if user.subscription_expires_at else None,
     }
